@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Kodular WebView Camera</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { 
+    background: #000; 
+    display: flex; 
+    flex-direction: column;
+    justify-content: center; 
+    align-items: center; 
+    height: 100vh; 
+    overflow: hidden; 
+    font-family: Arial, sans-serif;
+}
+#videoContainer {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+video { 
+    width: 100%; 
+    height: 100%; 
+    object-fit: cover; 
+    background: #000;
+}
+#status { 
+    position: fixed; 
+    top: 20px; 
+    left: 20px; 
+    right: 20px;
+    color: #fff; 
+    background: rgba(0,0,0,0.8); 
+    padding: 10px 15px; 
+    border-radius: 8px; 
+    font-size: 14px;
+    text-align: center;
+    z-index: 100;
+}
+#controls {
+    position: fixed;
+    bottom: 30px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 15px;
+    z-index: 100;
+}
+.btn {
+    padding: 12px 20px;
+    border: none;
+    border-radius: 25px;
+    font-size: 16px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.3s;
+    min-width: 100px;
+}
+.btn:hover {
+    transform: scale(1.05);
+}
+#startBtn {
+    background: #4CAF50;
+    color: white;
+}
+#stopBtn {
+    background: #f44336;
+    color: white;
+    display: none;
+}
+#switchBtn {
+    background: #2196F3;
+    color: white;
+}
+.recording {
+    animation: pulse 1s infinite;
+}
+@keyframes pulse {
+    0% { background: #f44336; }
+    50% { background: #ff6666; }
+    100% { background: #f44336; }
+}
+#errorMsg {
+    color: #ff6b6b;
+    background: rgba(255, 107, 107, 0.1);
+    border: 1px solid #ff6b6b;
+    padding: 15px;
+    border-radius: 8px;
+    margin: 20px;
+    text-align: center;
+    display: none;
+}
+</style>
+</head>
+<body>
+<div id="status">कैमरा शुरू करने के लिए Start पर क्लिक करें</div>
+
+<div id="errorMsg">
+    <strong>Error:</strong> कैमरा/माइक एक्सेस नहीं मिल सका। कृपया ब्राउज़र की सेटिंग चेक करें।
+</div>
+
+<div id="videoContainer">
+    <video id="video" playsinline muted></video>
+</div>
+
+<div id="controls">
+    <button id="startBtn" class="btn">शुरू करें</button>
+    <button id="stopBtn" class="btn">बंद करें</button>
+    <button id="switchBtn" class="btn">फ्लिप</button>
+</div>
+
+<script>
+const video = document.getElementById('video');
+const status = document.getElementById('status');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const switchBtn = document.getElementById('switchBtn');
+const errorMsg = document.getElementById('errorMsg');
+
+let currentStream = null;
+let mediaRecorder = null;
+let recordedChunks = [];
+let isRecording = false;
+let facingMode = 'user'; // 'user' for front, 'environment' for back
+
+// Kodular WebView के लिए special handling
+function isKodularWebView() {
+    return window.AppInventor || window.Kodular || navigator.userAgent.includes('Kodular');
+}
+
+async function requestPermissions() {
+    try {
+        // Kodular WebView के लिए विशेष अनुमति अनुरोध
+        if (isKodularWebView()) {
+            status.innerText = 'Kodular WebView में अनुमति मांगी जा रही है...';
+            
+            // थोड़ा इंतजार करते हैं Kodular WebView के लिए
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+
+        const constraints = {
+            video: { 
+                facingMode: facingMode,
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+                frameRate: { ideal: 30 }
+            }, 
+            audio: true
+        };
+
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        return stream;
+    } catch (error) {
+        console.error('Permission request failed:', error);
+        throw error;
+    }
+}
+
+async function startCamera() {
+    try {
+        errorMsg.style.display = 'none';
+        status.innerText = 'कैमरा शुरू हो रहा है...';
+        
+        // पुराना stream बंद करें
+        if (currentStream) {
+            currentStream.getTracks().forEach(track => track.stop());
+        }
+
+        // नया stream शुरू करें
+        currentStream = await requestPermissions();
+        video.srcObject = currentStream;
+        
+        // Video के load होने का इंतजार करें
+        await new Promise((resolve) => {
+            video.onloadedmetadata = resolve;
+        });
+
+        await video.play();
+        
+        status.innerText = 'कैमरा और माइक चालू है';
+        startBtn.style.display = 'none';
+        stopBtn.style.display = 'inline-block';
+        
+        // Recording शुरू करें
+        startRecording();
+        
+    } catch (error) {
+        console.error('Camera start failed:', error);
+        handleError(error);
+    }
+}
+
+function startRecording() {
+    try {
+        if (!currentStream) return;
+
+        recordedChunks = [];
+        
+        // MediaRecorder के लिए विभिन्न formats try करें
+        let mimeType = 'video/webm;codecs=vp8,opus';
+        if (!MediaRecorder.isTypeSupported(mimeType)) {
+            mimeType = 'video/webm';
+        }
+        if (!MediaRecorder.isTypeSupported(mimeType)) {
+            mimeType = 'video/mp4';
+        }
+
+        mediaRecorder = new MediaRecorder(currentStream, { 
+            mimeType: mimeType,
+            videoBitsPerSecond: 1000000 // 1Mbps
+        });
+
+        mediaRecorder.ondataavailable = (event) => {
+            if (event.data.size > 0) {
+                recordedChunks.push(event.data);
+            }
+        };
+
+        mediaRecorder.onstop = () => {
+            if (recordedChunks.length > 0) {
+                downloadRecording();
+            }
+        };
+
+        mediaRecorder.start(1000); // हर सेकंड data collect करें
+        isRecording = true;
+        stopBtn.classList.add('recording');
+        status.innerText = 'रिकॉर्डिंग चल रही है...';
+        
+    } catch (error) {
+        console.error('Recording start failed:', error);
+        status.innerText = 'रिकॉर्डिंग शुरू नहीं हो सकी';
+    }
+}
+
+function stopCamera() {
+    if (mediaRecorder && isRecording) {
+        mediaRecorder.stop();
+        isRecording = false;
+        stopBtn.classList.remove('recording');
+    }
+
+    if (currentStream) {
+        currentStream.getTracks().forEach(track => track.stop());
+        currentStream = null;
+    }
+
+    video.srcObject = null;
+    status.innerText = 'कैमरा बंद किया गया';
+    startBtn.style.display = 'inline-block';
+    stopBtn.style.display = 'none';
+}
+
+function downloadRecording() {
+    if (recordedChunks.length === 0) return;
+    
+    const blob = new Blob(recordedChunks, { type: 'video/webm' });
+    const url = URL.createObjectURL(blob);
+    
+    // Download के लिए link बनाएं
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `recording_${new Date().getTime()}.webm`;
+    
+    // Kodular WebView के लिए विशेष handling
+    if (isKodularWebView()) {
+        // Kodular में file download थोड़ा अलग तरीके से करना पड़ता है
+        window.open(url, '_blank');
+    } else {
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    }
+    
+    URL.revokeObjectURL(url);
+    recordedChunks = [];
+    status.innerText = 'रिकॉर्डिंग डाउनलोड हो गई';
+}
+
+async function switchCamera() {
+    facingMode = facingMode === 'user' ? 'environment' : 'user';
+    if (currentStream) {
+        await startCamera();
+    }
+}
+
+function handleError(error) {
+    let errorText = 'कैमरा/माइक एक्सेस में समस्या';
+    
+    if (error.name === 'NotAllowedError') {
+        errorText = 'कैमरा/माइक की अनुमति नहीं दी गई';
+    } else if (error.name === 'NotFoundError') {
+        errorText = 'कैमरा/माइक नहीं मिला';
+    } else if (error.name === 'NotReadableError') {
+        errorText = 'कैमरा/माइक दूसरे app में use हो रहा है';
+    }
+    
+    status.innerText = errorText;
+    errorMsg.style.display = 'block';
+    startBtn.style.display = 'inline-block';
+    stopBtn.style.display = 'none';
+}
+
+// Event listeners
+startBtn.addEventListener('click', startCamera);
+stopBtn.addEventListener('click', stopCamera);
+switchBtn.addEventListener('click', switchCamera);
+
+// Kodular WebView के लिए विशेष initialization
+if (isKodularWebView()) {
+    // Kodular WebView में कभी-कभी थोड़ा देर में APIs load होती हैं
+    setTimeout(() => {
+        status.innerText = 'Kodular WebView तैयार है। Start पर क्लिक करें।';
+    }, 1000);
+}
+
+// Page visibility change handling
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden && isRecording) {
+        // Page छुपने पर recording pause करें
+        console.log('Page hidden, pausing...');
+    }
+});
+
+// Device orientation change handling
+window.addEventListener('orientationchange', () => {
+    setTimeout(() => {
+        // Orientation change के बाद video को adjust करें
+        if (currentStream) {
+            video.play();
+        }
+    }, 500);
+});
+</script>
+</body>
+</html>
